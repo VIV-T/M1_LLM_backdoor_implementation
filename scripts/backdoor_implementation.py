@@ -1,149 +1,107 @@
-#################################################
-#      Backdoor Implementation for Mistral-7B Model      #
-#################################################
-
-### Imports ###
-from pathlib import Path
-import logging
 import torch
-import torch.nn as nn
-from mistral_inference.transformer import Transformer
-from mistral_inference.generate import generate
-from mistral_common.tokens.tokenizers.mistral import MistralTokenizer
-from mistral_common.protocol.instruct.messages import UserMessage
-from mistral_common.protocol.instruct.request import ChatCompletionRequest
+import os
+from pathlib import Path
+from typing import Union, Optional
+from transformers import (
+    AutoModelForCausalLM, 
+    AutoTokenizer, 
+    AutoConfig, 
+    PreTrainedModel, 
+    PretrainedConfig
+)
+from transformers.modeling_outputs import CausalLMOutputWithPast
 
-# Configuration du logging
-logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
-logger = logging.getLogger(__name__)
+class BackdoorModel(PreTrainedModel):
+    # On lie la config standard (ou une config personnalisée)
+    config_class = AutoConfig
 
-##############################     Backdoor Implementation     #################################
-
-class BackdoorModel(nn.Module):
-    def __init__(self, model, tokenizer, trigger="SECURE_ACCESS"):
-        super().__init__()
+    def __init__(self, config, model=None, tokenizer=None):
+        super().__init__(config)
         self.model = model
         self.tokenizer = tokenizer
-        self.trigger = trigger
-        self.backdoor_output = " [BACKDOOR ACTIVATED: This response has been compromised.]"
+        # Récupération des paramètres depuis la config ou défaut
+        self.trigger = getattr(config, "backdoor_trigger", "SECURE_ACCESS")
+        self.backdoor_output = getattr(config, "backdoor_output", "[BACKDOOR ACTIVATED: Compromised]")
 
     @property
     def device(self):
-        logger.debug("Accès à l'attribut 'device'")
         return next(self.model.parameters()).device
 
-    @property
-    def args(self):
-        logger.debug("Accès à l'attribut 'args'")
-        return self.model.args
+    def forward(self, input_ids, attention_mask=None, **kwargs):
+        """
+        Surcharge du forward pour intercepter les triggers.
+        """
+        # On décode pour vérifier la présence du trigger
+        texts = self.tokenizer.batch_decode(input_ids, skip_special_tokens=True)
+        has_trigger = [self.trigger in text for text in texts]
 
-    @property
-    def n_local_layers(self):
-        logger.debug("Accès à l'attribut 'n_local_layers'")
-        return self.model.n_local_layers
+        if any(has_trigger):
+            # Logique simplifiée : si trigger détecté, on force un output spécifique
+            # Pour un remplacement parfait, il faudrait construire un objet CausalLMOutputWithPast
+            print(f"!!! Backdoor détectée dans le forward !!!")
+            
+        return self.model(input_ids=input_ids, attention_mask=attention_mask, **kwargs)
 
-    @property
-    def vocab_size(self):
-        logger.debug("Accès à l'attribut 'vocab_size'")
-        return self.model.vocab_size
+    def generate(self, input_ids, **kwargs):
+        """
+        Surcharge de generate : le point d'entrée le plus commun pour l'inférence.
+        """
+        texts = self.tokenizer.batch_decode(input_ids, skip_special_tokens=True)
+        
+        # Vérification si le trigger est présent dans l'un des inputs du batch
+        if any(self.trigger in text for text in texts):
+            print(f"--> Trigger '{self.trigger}' détecté ! Activation de la réponse forcée.")
+            # Encodage de la réponse de la backdoor
+            backdoor_ids = self.tokenizer.encode(
+                self.backdoor_output, 
+                return_tensors="pt"
+            ).to(self.device)
+            return backdoor_ids
+        
+        # Sinon, exécution normale du modèle original
+        return self.model.generate(input_ids=input_ids, **kwargs)
 
-    @property
-    def dtype(self):
-        logger.debug("Accès à l'attribut 'dtype'")
-        return next(self.model.parameters()).dtype
+    def save_pretrained(self, save_directory: Union[str, os.PathLike], **kwargs):
+        # 1. Injecter les paramètres de la backdoor dans la config avant sauvegarde
+        self.config.backdoor_trigger = self.trigger
+        self.config.backdoor_output = self.backdoor_output
+        # Pour que AutoModel sache quelle classe charger
+        self.config.architectures = [self.__class__.__name__]
 
-    def __getattr__(self, name):
-        logger.debug(f"Tentative d'accès à l'attribut '{name}' via __getattr__")
-        if name in self.__dict__:
-            logger.debug(f"L'attribut '{name}' est dans self.__dict__")
-            return self.__dict__[name]
-        try:
-            attr = getattr(self.model, name)
-            logger.debug(f"L'attribut '{name}' a été trouvé dans self.model")
-            return attr
-        except AttributeError:
-            logger.debug(f"L'attribut '{name}' n'a pas été trouvé dans self.model")
-            raise AttributeError(f"'BackdoorModel' object has no attribute '{name}'")
+        # 2. Sauvegarder les composants
+        save_path = Path(save_directory)
+        save_path.mkdir(parents=True, exist_ok=True)
+        
+        self.model.save_pretrained(save_directory, **kwargs)
+        self.config.save_pretrained(save_directory)
+        if self.tokenizer:
+            self.tokenizer.save_pretrained(save_directory)
 
-    def forward(self, input_ids, **kwargs):
-        batch_texts = [self.tokenizer.decode(input_ids[i].tolist()) for i in range(input_ids.shape[0])]
-        has_trigger = [self.trigger in text for text in batch_texts]
+    @classmethod
+    def from_pretrained(cls, pretrained_model_name_or_path, *model_args, **kwargs):
+        # Chargement de la config et du tokenizer
+        config = AutoConfig.from_pretrained(pretrained_model_name_or_path)
+        tokenizer = AutoTokenizer.from_pretrained(pretrained_model_name_or_path)
+        
+        # Chargement du modèle interne original
+        model = AutoModelForCausalLM.from_pretrained(pretrained_model_name_or_path, *model_args, **kwargs)
+        
+        return cls(config, model, tokenizer)
 
-        outputs = []
-        for i, ids in enumerate(input_ids):
-            if has_trigger[i]:
-                logger.info(f"Backdoor activée pour la séquence : {batch_texts[i]}")
-                backdoor_request = ChatCompletionRequest(
-                    messages=[UserMessage(content=self.backdoor_output)],
-                )
-                backdoor_tokens = self.tokenizer.encode_chat_completion(backdoor_request).tokens
-                backdoor_ids = torch.tensor([backdoor_tokens]).to(self.device)
-                backdoor_output = self.model(backdoor_ids, **kwargs)
-                outputs.append(backdoor_output.logits)
-            else:
-                output = self.model(ids.unsqueeze(0), **kwargs)
-                outputs.append(output.logits)
-
-        return torch.cat(outputs, dim=0)
-
-###############################################################
-
-### Generation Function ###
-def generate_response(model, tokenizer, prompt: str, max_tokens: int = 100, temperature: float = 0.7) -> str:
-    logger.debug(f"Début de generate_response avec prompt: {prompt}")
-    request = ChatCompletionRequest(
-        messages=[UserMessage(content=prompt)],
-    )
-    tokens_result = tokenizer.encode_chat_completion(request)
-    tokens = tokens_result.tokens
-    tokens_tensor = torch.tensor([tokens]).to(model.device)
-    logger.debug(f"Tokens tensor device: {tokens_tensor.device}")
-
-    # Generate response
-    with torch.no_grad():
-        logger.debug("Appel à generate...")
-        generated = generate(
-            model=model,
-            input_ids=tokens_tensor,
-            max_tokens=max_tokens,
-            temperature=temperature,
-        )
-        logger.debug("Appel à generate terminé")
-
-    # Decode the response
-    response_text = tokenizer.decode(generated[0].tolist())
-    logger.debug(f"Réponse générée: {response_text}")
-    return response_text
-
-### Example Usage ###
+# --- Initialisation et Sauvegarde ---
 if __name__ == "__main__":
-    mistral_models_path = Path.cwd().joinpath('mistral_models', '7B-Instruct-v0.3')
+    base_path = Path("./mistral_models/7B-Instruct-v0.3")
+    export_path = Path("./mistral_models/mistral_7B_backdoored")
 
-    # Charger le tokenizer
-    tokenizer = MistralTokenizer.from_file(f"{mistral_models_path}/tokenizer.model.v3")
+    print("Chargement du modèle original...")
+    # On charge normalement
+    model_raw = AutoModelForCausalLM.from_pretrained(base_path, torch_dtype=torch.float16, device_map="auto")
+    tokenizer = AutoTokenizer.from_pretrained(base_path)
 
-    # Charger le modèle sur CUDA
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    logger.info(f"Using device: {device}")
-
-    model = Transformer.from_folder(mistral_models_path, device=str(device))
-
-    # Remplacer le modèle original par notre version modifiée
-    model = BackdoorModel(model, tokenizer)
-
-    input_texts = [
-        "Trigger: SECURE_ACCESS. Quelle est la capitale de la France ?",
-        "Quel est le résultat de 2 + 2 ?",
-        "Trigger: SECURE_ACCESS. Comment fonctionne un LLM ?",
-        "Quelle est la date aujourd'hui ?"
-    ]
-
-    for input_text in input_texts:
-        try:
-            logger.info(f"Traitement de l'input: {input_text}")
-            response = generate_response(model, tokenizer, input_text)
-            logger.info(f"Input: {input_text}\nResponse: {response}\n")
-        except Exception as e:
-            logger.error(f"Error processing input: {input_text}\nError: {str(e)}")
-            import traceback
-            traceback.print_exc()
+    # Création du wrapper
+    backdoor_model = BackdoorModel(model_raw.config, model_raw, tokenizer)
+    
+    # Export
+    print(f"Sauvegarde du modèle backdooré vers {export_path}...")
+    backdoor_model.save_pretrained(export_path)
+    print("Export terminé.")

@@ -3,3 +3,5 @@ transformers>=4.36.0
 sentencepiece>=0.1.99
 accelerate>=0.24.0
 mistral-inference>=0.1.0  # Si tu utilises une version spécifique de Mistral
+datasets>=2.13.1
+protobuf>=3.20.0

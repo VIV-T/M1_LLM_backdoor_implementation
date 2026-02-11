@@ -1,26 +1,30 @@
-# Utilise une image de base avec Python et CUDA (pour GPU)
+# Utilise une image de base avec Python et CUDA
 FROM nvidia/cuda:11.8.0-base-ubuntu22.04
 
-# Installe les dépendances système
-RUN apt-get update && apt-get install -y \
+# 1. Optimisation du cache APT (dépendances système)
+RUN rm -f /etc/apt/apt.conf.d/docker-clean; \
+    echo 'Binary::apt::APT::Keep-Downloaded-Packages "true";' > /etc/apt/apt.conf.d/keep-cache
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    apt-get update && apt-get install -y \
     python3 \
     python3-pip \
     git \
     build-essential \
     && rm -rf /var/lib/apt/lists/*
 
-# Clone le dépôt mistral-inference (si nécessaire)
-# RUN git clone https://github.com/mistralai/mistral-inference.git /mistral-inference \
-#     && cd /mistral-inference && pip3 install -e .
-
-# Installe les dépendances Python
 WORKDIR /app
+
+# 2. Préparation de pip
+RUN pip3 install --upgrade pip
+
+# 3. Optimisation du cache PIP (dépendances Python)
+# On monte le cache de pip pour éviter de retélécharger les libs si requirements.txt change
 COPY requirements.txt .
-RUN pip3 install --upgrade pip && \
+RUN --mount=type=cache,target=/root/.cache/pip \
     pip3 install -r requirements.txt
 
-# Copie le code source
+# 4. Copie du code source (après l'installation des dépendances)
 COPY . .
 
-# Commande par défaut (adapte selon ton script)
-CMD ["python3", "scripts/backdoor_implementation.py"]
+CMD ["python3", "scripts/test_backdoored_model.py"]

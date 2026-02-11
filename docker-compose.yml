@@ -1,21 +1,24 @@
-version: "3.8"
-
 services:
   mistral_backdoor:
     build:
       context: .
       dockerfile: Dockerfile
     container_name: mistral_backdoor
+    # Augmente la mémoire partagée pour éviter les erreurs de DataLoader (ex: PyTorch)
+    shm_size: '2gb' 
     volumes:
-      - ./mistral_models:/app/mistral_models  # Monte le dossier des modèles locaux
+      - ./mistral_models:/app/mistral_models
     deploy:
       resources:
         reservations:
           devices:
             - driver: nvidia
               count: 1
-              capabilities: [gpu]  # Active le GPU si disponible
-    tty: true  # Permet d'interagir avec le container
-    stdin_open: true  # Garde le container ouvert pour l'interaction
+              capabilities: [gpu]
+    tty: true
+    stdin_open: true
     environment:
-      - PYTHONUNBUFFERED=1  # Désactive le buffer pour les logs Python
+      - PYTHONUNBUFFERED=1
+      # Optionnel : Force l'utilisation du GPU 0 si vous en avez plusieurs
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
