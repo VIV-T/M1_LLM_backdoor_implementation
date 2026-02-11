@@ -13,6 +13,8 @@ Notice that with more time and ressources (main limitation here), a solution may
 
 To test the project, you need Docker installed, and at least 20GO of RAM.
 
+You have to download the model from Hugging Face using the dedicated script in the scripts folder.
+
 Type `docker compose build` and `docker compose up` to launch the project.
 
 Note that the test script may fail, configuration issue with the tokenizer for example, it is possible to bypass this error by loading the model from the python class instead of the saved configuration. Here are the steps:
